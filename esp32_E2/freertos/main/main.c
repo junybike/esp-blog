@@ -88,9 +88,7 @@ static void blink_timer_cb(void *arg)
     static bool led_on = false;
     led_on = !led_on;
 
-    uint32_t duty = (led_on && led_enabled) ? current_duty : 0;
-
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, duty);
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, led_on);
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
 }
 
@@ -181,12 +179,13 @@ void app_task(void *arg)
                     break;
 
                 case EVT_ADC_UPDATE:
+                    led_cmd_t cmd = {
+                        .type = LED_CMD_SET_BRIGHTNESS,
+                        .duty = adc_to_duty(evt.value)
+                    };
+
                     current_duty = cmd.duty;
-                    if (led_enabled)
-                    {
-                        ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, current_duty);
-                        ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
-                    }
+                    xQueueSend(led_queue, &cmd, 0);
                     /*
                     if (!dark && evt.value < ADC_DARK_TH)
                     {
@@ -232,12 +231,15 @@ void led_task(void *arg)
             {
                 case LED_CMD_ON:
                     esp_timer_stop(blink_timer);
-                    gpio_set_level(LED_GPIO, 1);
+                    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 1);
+                    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
                     break;
 
                 case LED_CMD_OFF:
+                    led_enabled = false;
                     esp_timer_stop(blink_timer);
-                    gpio_set_level(LED_GPIO, 0);
+                    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 0);
+                    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
                     break;
 
                 case LED_CMD_BLINK_SLOW:
@@ -251,8 +253,11 @@ void led_task(void *arg)
                     break;
                 
                 case LED_CMD_SET_BRIGHTNESS:
-                    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, cmd.duty);
-                    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
+                    if (led_enabled)
+                    {
+                        ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, cmd.duty);
+                        ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
+                    }
                     break;
             }
         }
