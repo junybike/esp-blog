@@ -5,6 +5,7 @@
 #include "freertos/queue.h"
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/adc.h"
 #include "esp_timer.h"
 #include "esp_attr.h"
@@ -25,6 +26,14 @@
 #define ADC_DARK_TH 1000
 #define ADC_BRIGHT_TH 2500
 
+#define LEDC_TIMER LEDC_TIMER_0
+#define LEDC_MODE LEDC_HIGH_SPEED_MODE
+#define LEDC_CHANNEL LEDC_CHANNEL_0
+#define LEDC_GPIO LED_GPIO
+
+#define LEDC_DUTY_RES LEDC_TIMER_13_BIT
+#define LEDC_FREQUENCY 5000
+
 typedef enum {
     EVT_BTN_SHORT,
     EVT_BTN_LONG,
@@ -38,7 +47,8 @@ typedef enum {
     LED_CMD_OFF,
     LED_CMD_BLINK_SLOW,
     LED_CMD_BLINK_FAST,
-} led_cmd_t;
+    LED_CMD_SET_BRIGHTNESS
+} led_cmd_type_t;
 
 typedef enum {
     BTN_IDLE = 0,
@@ -50,6 +60,14 @@ typedef struct {
     int value;
 } app_event_msg_t;
 
+typedef struct {
+    led_cmd_type_t type;
+    uint32_t duty;
+} led_cmd_t;
+
+static uint32_t current_duty = 0;
+static bool led_enabled = false;
+
 static button_state_t btn_state = BTN_IDLE;
 static int64_t press_time_us = 0;
  
@@ -59,11 +77,21 @@ static QueueHandle_t led_queue;
 static esp_timer_handle_t blink_timer;
 static esp_timer_handle_t debounce_timer;
 
+static uint32_t adc_to_duty(int adc)
+{
+    const uint32_t max_duty = (1 << 13) - 1;
+    return (adc * max_duty) / 4095;
+}
+
 static void blink_timer_cb(void *arg)
 {
     static bool led_on = false;
     led_on = !led_on;
-    gpio_set_level(LED_GPIO, led_on);
+
+    uint32_t duty = (led_on && led_enabled) ? current_duty : 0;
+
+    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, duty);
+    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
 }
 
 static void IRAM_ATTR button_isr_handler(void *arg)
@@ -126,7 +154,6 @@ void app_task(void *arg)
 {
     app_event_msg_t evt;
     led_cmd_t cmd;
-    bool led_on = false;
     bool dark = false;
 
     while (1)
@@ -136,24 +163,31 @@ void app_task(void *arg)
             switch (evt.type)
             {
                 case EVT_BTN_SHORT:
-                    led_on = !led_on;
+                    led_enabled = !led_enabled;
 
-                    cmd = led_on ? LED_CMD_BLINK_SLOW : LED_CMD_OFF;
+                    cmd.type = led_enabled ? LED_CMD_BLINK_SLOW : LED_CMD_OFF;
                     xQueueSend(led_queue, &cmd, portMAX_DELAY);
 
                     ESP_LOGI("APP", "Short press");
                     break;
 
                 case EVT_BTN_LONG:
-                    led_on = !led_on;
+                    led_enabled = !led_enabled;
 
-                    cmd = led_on ? LED_CMD_BLINK_FAST : LED_CMD_OFF;
+                    cmd.type = led_enabled ? LED_CMD_BLINK_FAST : LED_CMD_OFF;
                     xQueueSend(led_queue, &cmd, portMAX_DELAY); 
 
                     ESP_LOGI("APP", "Long press");
                     break;
 
                 case EVT_ADC_UPDATE:
+                    current_duty = cmd.duty;
+                    if (led_enabled)
+                    {
+                        ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, current_duty);
+                        ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
+                    }
+                    /*
                     if (!dark && evt.value < ADC_DARK_TH)
                     {
                         dark = true;
@@ -166,6 +200,7 @@ void app_task(void *arg)
                         app_event_msg_t e = { .type = EVT_ENV_BRIGHT };
                         xQueueSend(event_queue, &e, 0);
                     }
+                    */
 
                     ESP_LOGI("APP", "ADC value: %d", evt.value);
                     break;
@@ -193,7 +228,7 @@ void led_task(void *arg)
     {
         if (xQueueReceive(led_queue, &cmd, portMAX_DELAY))
         {
-            switch(cmd)
+            switch(cmd.type)
             {
                 case LED_CMD_ON:
                     esp_timer_stop(blink_timer);
@@ -214,6 +249,11 @@ void led_task(void *arg)
                     esp_timer_stop(blink_timer);
                     esp_timer_start_periodic(blink_timer, FAST_PERIOD_US);
                     break;
+                
+                case LED_CMD_SET_BRIGHTNESS:
+                    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, cmd.duty);
+                    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
+                    break;
             }
         }
     }
@@ -222,7 +262,7 @@ void led_task(void *arg)
 void app_main(void)
 {
     gpio_reset_pin(LED_GPIO);
-    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
+    // gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
 
     gpio_config_t io_conf = {
         .pin_bit_mask = 1ULL << BUTTON_GPIO,
@@ -234,6 +274,29 @@ void app_main(void)
 
     gpio_install_isr_service(0);
     gpio_isr_handler_add(BUTTON_GPIO, button_isr_handler, NULL);
+    
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode       = LEDC_MODE,
+        .timer_num        = LEDC_TIMER,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .freq_hz          = LEDC_FREQUENCY,
+        .clk_cfg          = LEDC_AUTO_CLK
+    };
+    ledc_timer_config(&ledc_timer);
+
+    ledc_channel_config_t ledc_channel = {
+        .speed_mode     = LEDC_MODE,
+        .channel        = LEDC_CHANNEL,
+        .timer_sel      = LEDC_TIMER,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = LEDC_GPIO,
+        .duty           = 0,
+        .hpoint         = 0
+    };
+    ledc_channel_config(&ledc_channel); 
+
+    adc1_config_width(ADC_WIDTH_BIT_12);
+    adc1_config_channel_atten(ADC_CH, ADC_ATTEN_DB_11);
 
     event_queue = xQueueCreate(10, sizeof(app_event_msg_t));
     led_queue = xQueueCreate(4, sizeof(led_cmd_t));
