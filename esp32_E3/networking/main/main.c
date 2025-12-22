@@ -12,20 +12,23 @@
 #include "esp_netif.h"
 
 #include "esp_http_client.h"
+#include "mqtt_client.h"
 
 /* CONFIG */
 
 #define WIFI_SSID       "HomeMesh"
 #define WIFI_PASS       "87654321"
 #define HTTP_POST_URL   "http://httpbin.org/post"
+#define MQTT_URI        "mqtt://broker.hivemq.com"
 
-static const char *TAG = "HTTP";
+static const char *TAG = "MQTT";
 
 /* EVENT GROUP */
 
 #define WIFI_CONNECTED_BIT BIT0
 
 static EventGroupHandle_t wifi_event_group;
+static esp_mqtt_client_handle_t mqtt_client;
 
 /* WIFI EVENT HANDLER */
 
@@ -77,6 +80,95 @@ static void wifi_init_sta(void)
     esp_wifi_start();
 
     ESP_LOGI(TAG, "WIFI initialized");
+}
+
+/* MQTT EVENT HANDLER */
+
+static void mqtt_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    esp_mqtt_event_handle_t event = event_data;
+
+    switch (event->event_id)
+    {
+        case MQTT_EVENT_CONNECTED:
+            ESP_LOGI(TAG, "MQTT connected");
+            esp_mqtt_client_subscribe(event->client, "esp32/demo/cmd", 0);
+            break;
+
+        case MQTT_EVENT_DISCONNECTED:
+            ESP_LOGW(TAG, "MQTT disconnected");
+            break;
+
+        case MQTT_EVENT_DATA:
+            ESP_LOGI(TAG, "MQTT RX [%.*s]: %.*s",
+                     event->topic_len, event->topic,
+                     event->data_len, event->data);
+
+            // Example: simple command parsing
+            if (strncmp(event->data, "ping", event->data_len) == 0)
+            {
+                esp_mqtt_client_publish(
+                    event->client,
+                    "esp32/demo/status",
+                    "pong",
+                    0, 1, 0);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void mqtt_start(void)
+{
+    esp_mqtt_client_config_t mqtt_cfg = {
+        .broker.address.uri = MQTT_URI,
+    };
+
+    mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_register_event(
+        mqtt_client,
+        ESP_EVENT_ANY_ID,
+        mqtt_event_handler,
+        NULL
+    );
+
+    esp_mqtt_client_start(mqtt_client);
+}
+
+/* MQTT PUBLISH TASK */
+
+void mqtt_publish_task(void *arg)
+{
+    /* Wait for Wi-Fi */
+    xEventGroupWaitBits(
+        wifi_event_group,
+        WIFI_CONNECTED_BIT,
+        pdFALSE,
+        pdTRUE,
+        portMAX_DELAY);
+
+    mqtt_start();
+
+    int count = 0;
+
+    while (1)
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg),
+                 "{\"count\": %d}", count++);
+
+        esp_mqtt_client_publish(
+            mqtt_client,
+            "esp32/demo/sensor",
+            msg,
+            0, 1, 0);
+
+        ESP_LOGI(TAG, "Published: %s", msg);
+
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
 }
 
 /* HTTP POST */
@@ -139,5 +231,8 @@ void app_main(void)
 {
     nvs_flash_init();
     wifi_init_sta();
-    xTaskCreate(http_task, "http_task", 4096, NULL, 5, NULL);
+
+    xTaskCreate(mqtt_publish_task, "mqtt_task", 4096, NULL, 5, NULL);
+    
+    // xTaskCreate(http_task, "http_task", 4096, NULL, 5, NULL);
 }
