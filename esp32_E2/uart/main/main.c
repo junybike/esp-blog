@@ -44,6 +44,16 @@
 #define UART_RX_BUF_SIZE 1024
 #define UART_TX_BUF_SIZE 1024
 
+#define BIN_SOF           0xAA
+#define BIN_CMD_ON        0x01
+#define BIN_CMD_OFF       0x02
+#define BIN_CMD_SLOW      0x03
+#define BIN_CMD_FAST      0x04
+#define BIN_CMD_BRIGHT    0x05
+#define BIN_CMD_STATUS    0x06
+
+#define BIN_CMD_STATUS_RESP 0x80
+
 typedef enum {
     LED_CMD_ON,
     LED_CMD_OFF,
@@ -66,6 +76,24 @@ typedef enum {
     SYS_OFF,
     SYS_ACTIVE
 } system_state_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t sof;
+    uint8_t cmd;
+    uint16_t value;
+    uint8_t crc;
+} bin_pkt_t;
+
+typedef enum {
+    BIN_WAIT_SOF,
+    BIN_WAIT_CMD,
+    BIN_WAIT_VAL_L,
+    BIN_WAIT_VAL_H,
+    BIN_WAIT_CRC
+} bin_state_t;
+
+static bin_state_t bin_state = BIN_WAIT_SOF;
+static bin_pkt_t bin_pkt;
 
 static system_state_t sys_state = SYS_OFF;
 static EventGroupHandle_t system_events;
@@ -135,6 +163,11 @@ static void debounce_timer_cb(void *arg)
     }
 }
 
+static uint8_t bin_crc(const bin_pkt_t *p)
+{
+    return p->sof ^ p->cmd ^ (p->value & 0xFF) ^ (p->value >> 8);
+}
+
 static void uart_send(const char *s)
 {
     uart_write_bytes(UART_PORT, s, strlen(s));
@@ -177,6 +210,90 @@ static void handle_uart_command(const char *cmd)
     }
 }
 
+static void send_bin_status(void)
+{
+    bin_pkt_t p = {
+        .sof = BIN_SOF,
+        .cmd = BIN_CMD_STATUS_RESP,
+        .value = (sys_state == SYS_ACTIVE),
+    };
+    p.crc = bin_crc(&p);
+    uart_write_bytes(UART_PORT, (const char *)&p, sizeof(p));
+}
+
+static void handle_bin_command(const bin_pkt_t *p)
+{
+    switch (p->cmd)
+    {
+        case BIN_CMD_ON:
+            xEventGroupSetBits(system_events, EVT_BTN_SHORT_BIT);
+            break;
+
+        case BIN_CMD_OFF:
+            xEventGroupSetBits(system_events, EVT_BTN_SHORT_BIT);
+            break;
+
+        case BIN_CMD_SLOW:
+            xEventGroupSetBits(system_events, EVT_BTN_SHORT_BIT);
+            break;
+
+        case BIN_CMD_FAST:
+            xEventGroupSetBits(system_events, EVT_BTN_LONG_BIT);
+            break;
+
+        case BIN_CMD_BRIGHT:
+            if (p->value > 4095) return;
+            adc_duty = adc_to_duty(p->value);
+            xEventGroupSetBits(system_events, EVT_ADC_UPDATE_BIT);
+            break;
+
+        case BIN_CMD_STATUS:
+            send_bin_status();
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void bin_parse_byte(uint8_t b)
+{
+    switch (bin_state)
+    {
+        case BIN_WAIT_SOF:
+            if (b == BIN_SOF) 
+            {
+                bin_pkt.sof = b;
+                bin_state = BIN_WAIT_CMD;
+            }
+            break;
+
+        case BIN_WAIT_CMD:
+            bin_pkt.cmd = b;
+            bin_state = BIN_WAIT_VAL_L;
+            break;
+
+        case BIN_WAIT_VAL_L:
+            bin_pkt.value = b;
+            bin_state = BIN_WAIT_VAL_H;
+            break;
+
+        case BIN_WAIT_VAL_H:
+            bin_pkt.value |= (b << 8);
+            bin_state = BIN_WAIT_CRC;
+            break;
+
+        case BIN_WAIT_CRC:
+            bin_pkt.crc = b;
+            if (bin_crc(&bin_pkt) == bin_pkt.crc) 
+            {
+                handle_bin_command(&bin_pkt);
+            }
+            bin_state = BIN_WAIT_SOF;
+            break;
+    }
+}
+
 void uart_rx_task(void *arg)
 {
     uint8_t rx_buf[128];
@@ -195,16 +312,24 @@ void uart_rx_task(void *arg)
         for (int i = 0; i < len; i++)
         {
             char c = rx_buf[i];
+            uint8_t b = rx_buf[i];
 
-            if (c == '\n' || c == '\r')
+            if (b == BIN_SOF || bin_state != BIN_WAIT_SOF)
             {
-                line[idx] = '\0';
-                idx = 0;
-                handle_uart_command(line);
+                bin_parse_byte(b);
             }
-            else if (idx < sizeof(line) - 1)
+            else
             {
-                line[idx++] = c;
+                if (c == '\n' || c == '\r')
+                {
+                    line[idx] = '\0';
+                    idx = 0;
+                    handle_uart_command(line);
+                }
+                else if (idx < sizeof(line) - 1)
+                {
+                    line[idx++] = c;
+                }
             }
         }
     }
