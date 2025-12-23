@@ -92,7 +92,7 @@ void app_main(void)
     esp_timer_create(&timer_args, &blink_timer);
     // esp_timer_start_periodic(blink_timer, SLOW_PERIOD_US);
 
-    xTaskCreate(app_task_led_powerswitch, "app_task", 2048, NULL, 5, &app_task_handle);
+    xTaskCreate(app_task_led_fast_slow, "app_task", 2048, NULL, 5, &app_task_handle);
     vTaskDelay(portMAX_DELAY);
 }
 

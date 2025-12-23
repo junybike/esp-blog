@@ -13,8 +13,6 @@
 #define LED_GPIO GPIO_NUM_25
 #define BUTTON_GPIO GPIO_NUM_0
 
-
-
 typedef enum {
     LED_OFF = 0,
     LED_ON
@@ -113,23 +111,19 @@ void app_main(void)
     gpio_install_isr_service(0);
     gpio_isr_handler_add(BUTTON_GPIO, button_isr_handler, NULL);
 
-    // Blink timer
     const esp_timer_create_args_t blink_args = {
         .callback = &blink_timer_cb,
         .name = "blink_timer"
     };
     esp_timer_create(&blink_args, &blink_timer);
 
-    // Debounce timer
     const esp_timer_create_args_t debounce_args = {
         .callback = &debounce_timer_cb,
         .name = "debounce_timer"
     };
     esp_timer_create(&debounce_args, &debounce_timer);
 
-    // Task
     xTaskCreate(app_task, "app_task", 2048, NULL, 5, &app_task_handle);
 
-    // Let scheduler run
     vTaskDelay(portMAX_DELAY);
 }

@@ -26,7 +26,7 @@ void app_main(void)
         .timer_sel      = LEDC_TIMER_0,
         .intr_type      = LEDC_INTR_DISABLE,
         .gpio_num       = LED_GPIO,
-        .duty           = 0,   // start off
+        .duty           = 0,   
         .hpoint         = 0
     };
     ledc_channel_config(&ledc_channel);
