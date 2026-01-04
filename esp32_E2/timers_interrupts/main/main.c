@@ -73,6 +73,7 @@ void app_main(void)
     gpio_reset_pin(LED_GPIO);
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
 
+    // Configure the button
     gpio_config_t io_conf = {
         .pin_bit_mask = 1ULL << BUTTON_GPIO,
         .mode = GPIO_MODE_INPUT,
@@ -84,14 +85,15 @@ void app_main(void)
     gpio_install_isr_service(0);
     gpio_isr_handler_add(BUTTON_GPIO, button_isr_handler, NULL);
 
+    // Configure the esp timer
     const esp_timer_create_args_t timer_args = {
         .callback = &timer_callback,
         .name = "blink_timer"
     };
 
     esp_timer_create(&timer_args, &blink_timer);
-    // esp_timer_start_periodic(blink_timer, SLOW_PERIOD_US);
-
+    
+    // Change app_task_led_fast_slow with app_task_led_powerswitch to see different behaviour when the button is pressed
     xTaskCreate(app_task_led_fast_slow, "app_task", 2048, NULL, 5, &app_task_handle);
     vTaskDelay(portMAX_DELAY);
 }
